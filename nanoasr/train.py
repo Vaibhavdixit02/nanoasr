@@ -1,4 +1,5 @@
 import argparse
+import math
 
 import torch
 from torch.utils.data import DataLoader
@@ -9,6 +10,14 @@ from nanoasr.model import Conformer, get_config
 from nanoasr.vocab import BLANK_IDX, decode_indices
 
 
+def _get_lr(step: int, warmup_steps: int, total_steps: int, peak_lr: float) -> float:
+    """Linear warmup then cosine decay to 0."""
+    if step < warmup_steps:
+        return peak_lr * (step + 1) / warmup_steps
+    progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
+    return peak_lr * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+
 def train(
     depth: int = 4,
     data: str = "dev-clean",
@@ -17,13 +26,15 @@ def train(
     batch_size: int = 8,
     lr: float = 0.0,
     num_workers: int = 2,
+    grad_clip: float = 5.0,
     device: str | None = None,
 ):
     """Train a Conformer-CTC model. Callable from notebooks or CLI."""
     config = get_config(depth)
-    lr = lr if lr > 0 else 3e-4 * depth / 12
+    peak_lr = lr if lr > 0 else 5e-4
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    use_amp = device == "cuda"
 
     train_ds = LibriSpeechDataset(root=data_root, split=data)
     train_loader = DataLoader(
@@ -37,11 +48,12 @@ def train(
 
     model = Conformer(config).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Model depth={depth}: {n_params:,} parameters | device={device}")
+    print(f"Model depth={depth}: {n_params:,} parameters | device={device} | amp={use_amp}")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=peak_lr, weight_decay=0.01)
     total_steps = len(train_loader) * epochs
     warmup_steps = max(total_steps // 10, 1)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     ctc_loss_fn = torch.nn.CTCLoss(blank=BLANK_IDX, zero_infinity=True)
 
@@ -53,30 +65,35 @@ def train(
         for mels, mel_lengths, targets, target_lengths in train_loader:
             mels = mels.to(device)
             targets = targets.to(device)
+            mel_lengths = mel_lengths.to(device)
 
-            log_probs = model(mels)                 # [B, T//4, 28]
-            input_lengths = mel_lengths // 4        # ConvStem 4x downsample
+            current_lr = _get_lr(step, warmup_steps, total_steps, peak_lr)
+            for pg in optimizer.param_groups:
+                pg["lr"] = current_lr
 
-            loss = ctc_loss_fn(
-                log_probs.permute(1, 0, 2),         # CTC wants [T, B, C]
-                targets,
-                input_lengths,
-                target_lengths,
-            )
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                log_probs = model(mels, mel_lengths)    # [B, T//4, 28]
+                input_lengths = mel_lengths // 4        # ConvStem 4x downsample
+
+                loss = ctc_loss_fn(
+                    log_probs.permute(1, 0, 2),         # CTC wants [T, B, C]
+                    targets,
+                    input_lengths,
+                    target_lengths,
+                )
 
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            if step < warmup_steps:
-                for pg in optimizer.param_groups:
-                    pg["lr"] = lr * (step + 1) / warmup_steps
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
 
             step += 1
             epoch_loss += loss.item()
 
             if step % 50 == 0:
-                print(f"step {step} | loss {loss.item():.4f} | lr {optimizer.param_groups[0]['lr']:.2e}")
+                print(f"step {step} | loss {loss.item():.4f} | lr {current_lr:.2e}")
 
         avg_loss = epoch_loss / len(train_loader)
         print(f"epoch {epoch + 1}/{epochs} | avg_loss {avg_loss:.4f}")
@@ -115,6 +132,7 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--lr", type=float, default=0.0)
     p.add_argument("--num-workers", type=int, default=2)
+    p.add_argument("--grad-clip", type=float, default=5.0)
     return p.parse_args()
 
 
@@ -128,6 +146,7 @@ def main():
         batch_size=args.batch_size,
         lr=args.lr,
         num_workers=args.num_workers,
+        grad_clip=args.grad_clip,
     )
 
 

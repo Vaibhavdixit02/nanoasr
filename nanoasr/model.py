@@ -8,6 +8,37 @@ from nanoasr.vocab import VOCAB_SIZE
 
 
 # ---------------------------------------------------------------------------
+# SpecAugment
+# ---------------------------------------------------------------------------
+
+class SpecAugment(nn.Module):
+    """Frequency and time masking applied during training only."""
+    def __init__(self, freq_masks: int = 2, freq_width: int = 15,
+                 time_masks: int = 2, time_width: int = 35):
+        super().__init__()
+        self.freq_masks = freq_masks
+        self.freq_width = freq_width
+        self.time_masks = time_masks
+        self.time_width = time_width
+
+    def forward(self, mel: torch.Tensor) -> torch.Tensor:
+        """mel: [B, n_mels, T]"""
+        if not self.training:
+            return mel
+        mel = mel.clone()
+        _, n_mels, T = mel.shape
+        for _ in range(self.freq_masks):
+            f = torch.randint(0, self.freq_width + 1, (1,)).item()
+            f0 = torch.randint(0, max(n_mels - f, 1), (1,)).item()
+            mel[:, f0:f0 + f, :] = 0.0
+        for _ in range(self.time_masks):
+            t = torch.randint(0, min(self.time_width, T) + 1, (1,)).item()
+            t0 = torch.randint(0, max(T - t, 1), (1,)).item()
+            mel[:, :, t0:t0 + t] = 0.0
+        return mel
+
+
+# ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
@@ -199,6 +230,7 @@ class Conformer(nn.Module):
     def __init__(self, config: ConformerConfig):
         super().__init__()
         self.config = config
+        self.spec_augment = SpecAugment()
         self.stem = ConvStem(config.d_model)
         self.blocks = nn.ModuleList([
             ConformerBlock(
@@ -211,9 +243,16 @@ class Conformer(nn.Module):
 
     def forward(self, mel: torch.Tensor, mel_lengths: torch.Tensor | None = None) -> torch.Tensor:
         # mel: [B, 80, T]
+        mel = self.spec_augment(mel)
         x = self.stem(mel)                        # [B, T//4, d_model]
+        T_down = x.shape[1]
 
-        mask = None  # TODO: derive from mel_lengths in Phase 1 training step
+        mask = None
+        if mel_lengths is not None:
+            seq_lengths = mel_lengths // 4
+            idx = torch.arange(T_down, device=x.device)
+            # [B, 1, 1, T] bool mask: True = attend, False = ignore
+            mask = (idx.unsqueeze(0) < seq_lengths.unsqueeze(1)).unsqueeze(1).unsqueeze(1)
 
         for block in self.blocks:
             x = block(x, mask=mask)
