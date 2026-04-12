@@ -12,5 +12,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+live = ["sounddevice>=0.4"]
 export = ["coremltools>=7.0", "onnx"]
 dev = ["pytest", "matplotlib", "ipykernel"]
+
+[project.scripts]
+nanoasr-live = "nanoasr.live:main"

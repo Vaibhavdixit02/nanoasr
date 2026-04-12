@@ -32,6 +32,20 @@ python -m nanoasr \
 
 Set `--lr 0` (default) for auto-scaling: `3e-4 * depth / 12`.
 
+## Live transcription (microphone)
+
+Record from your mic and transcribe in real time with a trained checkpoint:
+
+```bash
+brew install portaudio           # macOS prerequisite
+pip install -e ".[live]"
+nanoasr-live model_depth4.pt
+```
+
+Push-to-talk: press Enter to start recording, Enter again to stop — the transcription prints immediately. Ctrl-C to quit.
+
+> Download your checkpoint from Google Drive (or wherever you saved it) and place it in the project root.
+
 ## Architecture
 
 **Conformer-CTC** — the single `depth` parameter controls everything:
@@ -61,6 +75,7 @@ nanoasr/
 ├── vocab.py      # 28-char CTC vocabulary
 ├── decode.py     # Greedy CTC decoding
 ├── train.py      # Training loop (callable + CLI)
+├── live.py       # Push-to-talk mic transcription
 └── __main__.py   # python -m nanoasr entrypoint
 train.ipynb       # Colab notebook
 pyproject.toml
