@@ -5,9 +5,9 @@ import torch
 from torch.utils.data import DataLoader
 
 from nanoasr.data import LibriSpeechDataset, collate_fn
-from nanoasr.decode import greedy_decode_batch
+from nanoasr.eval import evaluate
 from nanoasr.model import Conformer, get_config
-from nanoasr.vocab import BLANK_IDX, decode_indices
+from nanoasr.vocab import BLANK_IDX
 
 
 def _get_lr(step: int, warmup_steps: int, total_steps: int, peak_lr: float) -> float:
@@ -20,13 +20,15 @@ def _get_lr(step: int, warmup_steps: int, total_steps: int, peak_lr: float) -> f
 
 def train(
     depth: int = 4,
-    data: str = "dev-clean",
+    data: str = "train-clean-100",
+    eval_data: str = "dev-clean",
     data_root: str = "./data",
     epochs: int = 50,
-    batch_size: int = 8,
+    batch_size: int = 16,
     lr: float = 0.0,
     num_workers: int = 2,
     grad_clip: float = 5.0,
+    eval_every: int = 5,
     device: str | None = None,
 ):
     """Train a Conformer-CTC model. Callable from notebooks or CLI."""
@@ -46,6 +48,19 @@ def train(
         pin_memory=(device == "cuda"),
     )
 
+    eval_loader = None
+    if eval_data:
+        eval_ds = LibriSpeechDataset(root=data_root, split=eval_data)
+        eval_loader = DataLoader(
+            eval_ds,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            pin_memory=(device == "cuda"),
+        )
+        print(f"Train: {len(train_ds)} utterances ({data}) | Eval: {len(eval_ds)} utterances ({eval_data})")
+
     model = Conformer(config).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model depth={depth}: {n_params:,} parameters | device={device} | amp={use_amp}")
@@ -57,6 +72,7 @@ def train(
 
     ctc_loss_fn = torch.nn.CTCLoss(blank=BLANK_IDX, zero_infinity=True)
 
+    best_wer = float("inf")
     step = 0
     for epoch in range(epochs):
         model.train()
@@ -98,18 +114,19 @@ def train(
         avg_loss = epoch_loss / len(train_loader)
         print(f"epoch {epoch + 1}/{epochs} | avg_loss {avg_loss:.4f}")
 
-        model.eval()
-        with torch.no_grad():
-            sample = next(iter(train_loader))
-            sample_mels, sample_mel_lens, sample_targets, sample_target_lens = sample
-            sample_log_probs = model(sample_mels.to(device))
-            sample_input_lens = sample_mel_lens // 4
-            predictions = greedy_decode_batch(sample_log_probs.cpu(), sample_input_lens)
-            for i in range(min(3, len(predictions))):
-                ref = decode_indices(sample_targets[i][:sample_target_lens[i]].tolist())
-                print(f"  REF: {ref}")
-                print(f"  HYP: {predictions[i]}")
-                print()
+        if eval_loader is not None and (epoch + 1) % eval_every == 0:
+            result = evaluate(model, eval_loader, device=device, log_samples=3)
+            if result["wer"] < best_wer:
+                best_wer = result["wer"]
+                best_path = f"model_depth{depth}_best.pt"
+                torch.save({
+                    "model_state_dict": model.state_dict(),
+                    "config": config,
+                    "step": step,
+                    "epoch": epoch + 1,
+                    "wer": best_wer,
+                }, best_path)
+                print(f"  New best WER: {best_wer:.2%} -> saved {best_path}")
 
     checkpoint = {
         "model_state_dict": model.state_dict(),
@@ -119,20 +136,24 @@ def train(
     }
     save_path = f"model_depth{depth}.pt"
     torch.save(checkpoint, save_path)
-    print(f"Saved checkpoint to {save_path}")
+    print(f"Saved final checkpoint to {save_path}")
+    if best_wer < float("inf"):
+        print(f"Best eval WER: {best_wer:.2%}")
     return model, config
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train nano-asr Conformer-CTC")
     p.add_argument("--depth", type=int, default=4)
-    p.add_argument("--data", type=str, default="dev-clean")
+    p.add_argument("--data", type=str, default="train-clean-100")
+    p.add_argument("--eval-data", type=str, default="dev-clean")
     p.add_argument("--data-root", type=str, default="./data")
     p.add_argument("--epochs", type=int, default=50)
-    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=0.0)
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--grad-clip", type=float, default=5.0)
+    p.add_argument("--eval-every", type=int, default=5)
     return p.parse_args()
 
 
@@ -141,12 +162,14 @@ def main():
     train(
         depth=args.depth,
         data=args.data,
+        eval_data=args.eval_data,
         data_root=args.data_root,
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
         num_workers=args.num_workers,
         grad_clip=args.grad_clip,
+        eval_every=args.eval_every,
     )
 
 
