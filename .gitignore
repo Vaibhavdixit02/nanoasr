@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+dist/
+build/
+
+# Data (LibriSpeech is ~6GB, never commit it)
+data/
+*.flac
+*.wav
+
+# Model checkpoints (can be 10s-100s of MB)
+runs/
+*.pt
+*.onnx
+*.mlpackage/
+*.mlmodel
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Colab
+*.ipynb_checkpoints/

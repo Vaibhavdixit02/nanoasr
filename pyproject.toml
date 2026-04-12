@@ -1,0 +1,12 @@
+[project]
+name = "nano-asr"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1",
+    "torchaudio>=2.1",
+]
+
+[project.optional-dependencies]
+export = ["coremltools>=7.0", "onnx"]
+dev = ["pytest", "matplotlib"]
