@@ -9,4 +9,4 @@ dependencies = [
 
 [project.optional-dependencies]
 export = ["coremltools>=7.0", "onnx"]
-dev = ["pytest", "matplotlib"]
+dev = ["pytest", "matplotlib", "ipykernel"]
