@@ -1,5 +1,6 @@
 import argparse
 import math
+import os
 
 import torch
 from torch.utils.data import DataLoader
@@ -18,6 +19,19 @@ def _get_lr(step: int, warmup_steps: int, total_steps: int, peak_lr: float) -> f
     return peak_lr * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
+def _save_checkpoint(path, model, config, optimizer, scaler, step, epoch, best_wer):
+    """Save a full training checkpoint (model + optimizer + training state)."""
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scaler_state_dict": scaler.state_dict(),
+        "config": config,
+        "step": step,
+        "epoch": epoch,
+        "best_wer": best_wer,
+    }, path)
+
+
 def train(
     depth: int = 4,
     data: str = "train-clean-100",
@@ -30,13 +44,22 @@ def train(
     grad_clip: float = 5.0,
     eval_every: int = 5,
     device: str | None = None,
+    save_dir: str = ".",
+    resume: str | None = None,
 ):
-    """Train a Conformer-CTC model. Callable from notebooks or CLI."""
+    """Train a Conformer-CTC model. Callable from notebooks or CLI.
+
+    Args:
+        save_dir: Directory for checkpoints. Set to a Google Drive path
+            on Colab so checkpoints survive disconnects.
+        resume: Path to a checkpoint to resume training from.
+    """
     config = get_config(depth)
     peak_lr = lr if lr > 0 else 5e-4
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     use_amp = device == "cuda"
+    os.makedirs(save_dir, exist_ok=True)
 
     train_ds = LibriSpeechDataset(root=data_root, split=data)
     train_loader = DataLoader(
@@ -73,8 +96,26 @@ def train(
     ctc_loss_fn = torch.nn.CTCLoss(blank=BLANK_IDX, zero_infinity=True)
 
     best_wer = float("inf")
+    start_epoch = 0
     step = 0
-    for epoch in range(epochs):
+
+    # Resume from checkpoint
+    if resume and os.path.isfile(resume):
+        ckpt = torch.load(resume, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        if "optimizer_state_dict" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "scaler_state_dict" in ckpt:
+            scaler.load_state_dict(ckpt["scaler_state_dict"])
+        start_epoch = ckpt.get("epoch", 0)
+        step = ckpt.get("step", 0)
+        best_wer = ckpt.get("best_wer", ckpt.get("wer", float("inf")))
+        print(f"Resumed from {resume} (epoch {start_epoch}, step {step}, best_wer {best_wer:.2%})")
+
+    last_ckpt_path = os.path.join(save_dir, f"model_depth{depth}_last.pt")
+    best_ckpt_path = os.path.join(save_dir, f"model_depth{depth}_best.pt")
+
+    for epoch in range(start_epoch, epochs):
         model.train()
         epoch_loss = 0.0
 
@@ -114,29 +155,24 @@ def train(
         avg_loss = epoch_loss / len(train_loader)
         print(f"epoch {epoch + 1}/{epochs} | avg_loss {avg_loss:.4f}")
 
+        # Save resumable checkpoint every epoch
+        _save_checkpoint(last_ckpt_path, model, config, optimizer, scaler,
+                         step, epoch + 1, best_wer)
+        print(f"  checkpoint -> {last_ckpt_path}")
+
         if eval_loader is not None and (epoch + 1) % eval_every == 0:
             result = evaluate(model, eval_loader, device=device, log_samples=3)
             if result["wer"] < best_wer:
                 best_wer = result["wer"]
-                best_path = f"model_depth{depth}_best.pt"
-                torch.save({
-                    "model_state_dict": model.state_dict(),
-                    "config": config,
-                    "step": step,
-                    "epoch": epoch + 1,
-                    "wer": best_wer,
-                }, best_path)
-                print(f"  New best WER: {best_wer:.2%} -> saved {best_path}")
+                _save_checkpoint(best_ckpt_path, model, config, optimizer,
+                                 scaler, step, epoch + 1, best_wer)
+                print(f"  New best WER: {best_wer:.2%} -> saved {best_ckpt_path}")
 
-    checkpoint = {
-        "model_state_dict": model.state_dict(),
-        "config": config,
-        "step": step,
-        "epoch": epochs,
-    }
-    save_path = f"model_depth{depth}.pt"
-    torch.save(checkpoint, save_path)
-    print(f"Saved final checkpoint to {save_path}")
+    # Save final checkpoint
+    final_path = os.path.join(save_dir, f"model_depth{depth}.pt")
+    _save_checkpoint(final_path, model, config, optimizer, scaler,
+                     step, epochs, best_wer)
+    print(f"Saved final checkpoint to {final_path}")
     if best_wer < float("inf"):
         print(f"Best eval WER: {best_wer:.2%}")
     return model, config
@@ -154,6 +190,9 @@ def parse_args():
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--grad-clip", type=float, default=5.0)
     p.add_argument("--eval-every", type=int, default=5)
+    p.add_argument("--save-dir", type=str, default=".")
+    p.add_argument("--resume", type=str, default=None,
+                   help="Path to checkpoint to resume training from")
     return p.parse_args()
 
 
@@ -170,6 +209,8 @@ def main():
         num_workers=args.num_workers,
         grad_clip=args.grad_clip,
         eval_every=args.eval_every,
+        save_dir=args.save_dir,
+        resume=args.resume,
     )
 
 
