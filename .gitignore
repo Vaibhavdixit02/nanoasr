@@ -11,6 +11,9 @@ data/
 *.flac
 *.wav
 
+# Test audio samples
+test_audio/
+
 # Model checkpoints (can be 10s-100s of MB)
 runs/
 *.pt
@@ -25,5 +28,6 @@ runs/
 .vscode/
 .idea/
 
-# Colab
+# Colab / Jupyter
 *.ipynb_checkpoints/
+.ipynb_checkpoints/
