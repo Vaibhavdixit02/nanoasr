@@ -3,6 +3,8 @@ import math
 import os
 import time
 
+_DEFAULT_WORKERS = min(4, os.cpu_count() or 1)
+
 import torch
 from torch.utils.data import DataLoader
 
@@ -42,7 +44,7 @@ def train(
     epochs: int = 50,
     batch_size: int = 64,
     lr: float = 0.0,
-    num_workers: int = 4,
+    num_workers: int = _DEFAULT_WORKERS,
     grad_clip: float = 5.0,
     eval_every: int = 5,
     device: str | None = None,
@@ -204,7 +206,7 @@ def parse_args():
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--lr", type=float, default=0.0)
-    p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--num-workers", type=int, default=_DEFAULT_WORKERS)
     p.add_argument("--grad-clip", type=float, default=5.0)
     p.add_argument("--eval-every", type=int, default=5)
     p.add_argument("--save-dir", type=str, default=".")
