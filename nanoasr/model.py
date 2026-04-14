@@ -40,7 +40,11 @@ def load_model(checkpoint_path: str, device: str) -> "Conformer":
 # ---------------------------------------------------------------------------
 
 class SpecAugment(nn.Module):
-    """Frequency and time masking applied during training only."""
+    """Frequency and time masking applied during training only.
+
+    Uses boolean-mask arithmetic instead of .item() so that
+    torch.compile can trace through without graph breaks.
+    """
     def __init__(self, freq_masks: int = 2, freq_width: int = 15,
                  time_masks: int = 2, time_width: int = 35):
         super().__init__()
@@ -54,15 +58,27 @@ class SpecAugment(nn.Module):
         if not self.training:
             return mel
         mel = mel.clone()
-        _, n_mels, T = mel.shape
+        B, n_mels, T = mel.shape
+        device = mel.device
+
+        freq_idx = torch.arange(n_mels, device=device)
+        time_idx = torch.arange(T, device=device)
+
         for _ in range(self.freq_masks):
-            f = torch.randint(0, self.freq_width + 1, (1,)).item()
-            f0 = torch.randint(0, max(n_mels - f, 1), (1,)).item()
-            mel[:, f0:f0 + f, :] = 0.0
+            f = torch.randint(0, self.freq_width + 1, (1,), device=device)
+            f0 = torch.randint(0, n_mels, (1,), device=device)
+            f0 = f0.clamp(max=(n_mels - f).clamp(min=0))
+            mask = (freq_idx >= f0) & (freq_idx < f0 + f)  # [n_mels]
+            mel.masked_fill_(mask[None, :, None], 0.0)
+
         for _ in range(self.time_masks):
-            t = torch.randint(0, min(self.time_width, T) + 1, (1,)).item()
-            t0 = torch.randint(0, max(T - t, 1), (1,)).item()
-            mel[:, :, t0:t0 + t] = 0.0
+            t_width = min(self.time_width, T)
+            t = torch.randint(0, t_width + 1, (1,), device=device)
+            t0 = torch.randint(0, T, (1,), device=device)
+            t0 = t0.clamp(max=(T - t).clamp(min=0))
+            mask = (time_idx >= t0) & (time_idx < t0 + t)  # [T]
+            mel.masked_fill_(mask[None, None, :], 0.0)
+
         return mel
 
 
