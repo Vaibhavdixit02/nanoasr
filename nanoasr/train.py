@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 
 from nanoasr.data import BucketBatchSampler, LibriSpeechDataset, collate_fn
 from nanoasr.eval import evaluate
-from nanoasr.model import Conformer, get_config
+from nanoasr.model import Conformer, get_config, get_device
 from nanoasr.vocab import BLANK_IDX
 
 
@@ -60,8 +60,7 @@ def train(
     """
     config = get_config(depth)
     peak_lr = lr if lr > 0 else 5e-4
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_device(device)
     use_amp = device == "cuda"
     os.makedirs(save_dir, exist_ok=True)
 

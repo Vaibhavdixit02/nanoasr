@@ -7,6 +7,34 @@ import torch.nn.functional as F
 from nanoasr.vocab import VOCAB_SIZE
 
 
+def get_device(device: str | None = None) -> str:
+    """Pick the best available device: cuda > mps > cpu."""
+    if device is not None:
+        return device
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def load_model(checkpoint_path: str, device: str) -> "Conformer":
+    """Load a Conformer from a saved checkpoint."""
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if isinstance(ckpt, dict) and "config" in ckpt:
+        config = ckpt["config"]
+        state_dict = ckpt.get("model_state_dict", ckpt.get("model"))
+    else:
+        config = get_config(depth=4)
+        state_dict = ckpt
+    model = Conformer(config).to(device)
+    model.load_state_dict(state_dict)
+    model.eval()
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"Loaded model (depth={config.depth}, {n_params:,} params) on {device}")
+    return model
+
+
 # ---------------------------------------------------------------------------
 # SpecAugment
 # ---------------------------------------------------------------------------
