@@ -8,26 +8,10 @@ import torchaudio
 
 from nanoasr.decode import greedy_decode
 from nanoasr.mel import MelSpectrogramTransform
-from nanoasr.model import Conformer, get_config
+from nanoasr.model import Conformer, get_device, load_model
 
 
 SAMPLE_RATE = 16_000
-
-
-def load_model(checkpoint_path: str, device: str) -> Conformer:
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    if isinstance(ckpt, dict) and "config" in ckpt:
-        config = ckpt["config"]
-        state_dict = ckpt.get("model_state_dict", ckpt.get("model"))
-    else:
-        config = get_config(depth=4)
-        state_dict = ckpt
-    model = Conformer(config).to(device)
-    model.load_state_dict(state_dict)
-    model.eval()
-    n_params = sum(p.numel() for p in model.parameters())
-    print(f"Loaded model (depth={config.depth}, {n_params:,} params) on {device}")
-    return model
 
 
 @torch.no_grad()
@@ -55,15 +39,7 @@ def main():
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 
-    if args.device is None:
-        if torch.cuda.is_available():
-            device = "cuda"
-        elif torch.backends.mps.is_available():
-            device = "mps"
-        else:
-            device = "cpu"
-    else:
-        device = args.device
+    device = get_device(args.device)
 
     model = load_model(args.checkpoint, device)
     mel_transform = MelSpectrogramTransform()

@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader
 from nanoasr.data import LibriSpeechDataset, collate_fn
 from nanoasr.decode import greedy_decode_batch
 from nanoasr.metrics import char_error_rate, word_error_rate
-from nanoasr.model import Conformer
+from nanoasr.model import Conformer, get_device
 from nanoasr.vocab import decode_indices
 
 
@@ -53,8 +53,7 @@ def evaluate_checkpoint(
     device: str | None = None,
 ) -> dict:
     """Load a saved checkpoint and evaluate it."""
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_device(device)
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = ckpt["config"]
