@@ -1,3 +1,5 @@
+import os
+import random
 import re
 
 import torch
@@ -31,6 +33,52 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.dataset)
+
+    def get_lengths(self):
+        """Return number of audio samples per utterance (fast header reads, cached)."""
+        ds = self.dataset
+        cache_path = os.path.join(ds._path, "_lengths.pt")
+        if os.path.exists(cache_path):
+            return torch.load(cache_path, weights_only=True)
+
+        print(f"Pre-scanning {len(ds)} utterance lengths (one-time cost)...")
+        lengths = []
+        for fileid in ds._walker:
+            speaker, chapter, _ = fileid.split("-")
+            path = os.path.join(ds._path, speaker, chapter, fileid + ds._ext_audio)
+            info = torchaudio.info(path)
+            lengths.append(info.num_frames)
+
+        lengths = torch.tensor(lengths, dtype=torch.long)
+        torch.save(lengths, cache_path)
+        return lengths
+
+
+class BucketBatchSampler(torch.utils.data.Sampler):
+    """Groups similar-length utterances into batches to minimize padding waste.
+
+    Sorts utterances by audio length, creates batches of consecutive (similar-
+    length) items, then shuffles the batch order each epoch.  This dramatically
+    reduces wasted compute from padding short utterances to match long ones.
+    """
+
+    def __init__(self, lengths, batch_size, shuffle=True):
+        self.shuffle = shuffle
+        sorted_indices = sorted(range(len(lengths)), key=lambda i: lengths[i])
+        self.batches = [
+            sorted_indices[i:i + batch_size]
+            for i in range(0, len(sorted_indices), batch_size)
+        ]
+
+    def __iter__(self):
+        order = list(range(len(self.batches)))
+        if self.shuffle:
+            random.shuffle(order)
+        for i in order:
+            yield self.batches[i]
+
+    def __len__(self):
+        return len(self.batches)
 
 
 def collate_fn(batch):
