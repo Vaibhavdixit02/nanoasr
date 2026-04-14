@@ -1,4 +1,9 @@
-"""Push-to-talk microphone transcription with a trained nanoasr model."""
+"""Push-to-talk microphone transcription with a trained nanoasr model.
+
+Requires ``sounddevice`` (install via ``pip install nanoasr[live]``).
+Uses ``select.select`` for non-blocking stdin, so this module only works
+on Unix-like systems (Linux, macOS).  Windows is not supported.
+"""
 
 import argparse
 import sys

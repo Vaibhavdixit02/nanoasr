@@ -33,7 +33,7 @@ def load_model(checkpoint_path: str, device: str) -> Conformer:
 @torch.no_grad()
 def transcribe_file(model: Conformer, audio_path: str,
                     mel_transform: MelSpectrogramTransform,
-                    device: str) -> tuple[str, float]:
+                    device: str) -> tuple[str, float, float]:
     waveform, sr = torchaudio.load(audio_path)
     if sr != SAMPLE_RATE:
         waveform = torchaudio.functional.resample(waveform, sr, SAMPLE_RATE)

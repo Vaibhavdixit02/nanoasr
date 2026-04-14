@@ -3,8 +3,11 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "nano-asr"
+name = "nanoasr"
 version = "0.1.0"
+description = "A minimal, hackable speech recognizer. Train a Conformer-CTC model on LibriSpeech from scratch."
+readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.1",
@@ -13,8 +16,8 @@ dependencies = [
 
 [project.optional-dependencies]
 live = ["sounddevice>=0.4"]
-export = ["coremltools>=7.0", "onnx"]
 dev = ["pytest", "matplotlib", "ipykernel"]
 
 [project.scripts]
 nanoasr-live = "nanoasr.live:main"
+nanoasr-transcribe = "nanoasr.transcribe:main"

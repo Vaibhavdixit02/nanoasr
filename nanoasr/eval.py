@@ -22,7 +22,8 @@ def evaluate(
 
     for mels, mel_lengths, targets, target_lengths in eval_loader:
         mels = mels.to(device)
-        log_probs = model(mels)
+        mel_lengths = mel_lengths.to(device)
+        log_probs = model(mels, mel_lengths)
         input_lengths = mel_lengths // 4
         hyps = greedy_decode_batch(log_probs.cpu(), input_lengths)
         for i in range(len(hyps)):
