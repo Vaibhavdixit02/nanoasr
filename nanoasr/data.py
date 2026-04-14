@@ -35,7 +35,7 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
         return len(self.dataset)
 
     def get_lengths(self):
-        """Return number of audio samples per utterance (fast header reads, cached)."""
+        """Return number of audio samples per utterance (one-time scan, cached)."""
         ds = self.dataset
         cache_path = os.path.join(ds._path, "_lengths.pt")
         if os.path.exists(cache_path):
@@ -46,8 +46,8 @@ class LibriSpeechDataset(torch.utils.data.Dataset):
         for fileid in ds._walker:
             speaker, chapter, _ = fileid.split("-")
             path = os.path.join(ds._path, speaker, chapter, fileid + ds._ext_audio)
-            info = torchaudio.info(path)
-            lengths.append(info.num_frames)
+            waveform, _ = torchaudio.load(path)
+            lengths.append(waveform.shape[1])
 
         lengths = torch.tensor(lengths, dtype=torch.long)
         torch.save(lengths, cache_path)
