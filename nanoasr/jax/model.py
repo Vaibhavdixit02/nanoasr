@@ -244,14 +244,13 @@ class Conformer(nnx.Module):
         self.config = config
         self.spec_augment = SpecAugment(rngs=rngs)
         self.stem = ConvStem(config.d_model, rngs=rngs)
-        self.blocks = nnx.List([
-            ConformerBlock(
+        self.n_layers = config.n_layers
+        for i in range(config.n_layers):
+            setattr(self, f"block_{i}", ConformerBlock(
                 config.d_model, config.n_heads,
                 config.conv_kernel, config.ff_mult, config.dropout,
                 rngs=rngs,
-            )
-            for _ in range(config.n_layers)
-        ])
+            ))
         self.ctc_head = nnx.Linear(config.d_model, config.vocab_size, rngs=rngs)
 
     def __call__(self, mel: jax.Array, mel_lengths: jax.Array | None = None,
@@ -272,8 +271,8 @@ class Conformer(nnx.Module):
             # [B, 1, 1, T] bool mask: True = attend, False = ignore
             mask = (idx[None, :] < seq_lengths[:, None])[:, None, None, :]
 
-        for block in self.blocks:
-            x = block(x, mask=mask, deterministic=deterministic)
+        for i in range(self.n_layers):
+            x = getattr(self, f"block_{i}")(x, mask=mask, deterministic=deterministic)
 
         logits = self.ctc_head(x)                 # [B, T//4, vocab_size]
         return logits
