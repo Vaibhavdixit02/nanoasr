@@ -8,9 +8,9 @@ _DEFAULT_WORKERS = min(4, os.cpu_count() or 1)
 import torch
 from torch.utils.data import DataLoader
 
-from nanoasr.data import BucketBatchSampler, LibriSpeechDataset, collate_fn
-from nanoasr.eval import evaluate
-from nanoasr.model import Conformer, get_config, get_device
+from nanoasr.torch.data import BucketBatchSampler, LibriSpeechDataset, collate_fn
+from nanoasr.torch.eval import evaluate
+from nanoasr.torch.model import Conformer, get_config, get_device
 from nanoasr.vocab import BLANK_IDX
 
 

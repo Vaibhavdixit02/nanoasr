@@ -1,5 +1,5 @@
 import torch
-from nanoasr.model import (
+from nanoasr.torch.model import (
     Conformer, ConformerConfig, get_config,
     FeedForward, RotaryEmbedding, MultiHeadSelfAttention,
     ConvModule, ConformerBlock, ConvStem,

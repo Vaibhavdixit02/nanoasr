@@ -17,6 +17,7 @@ test_audio/
 # Model checkpoints (can be 10s-100s of MB)
 runs/
 *.pt
+*.pkl
 *.onnx
 *.mlpackage/
 *.mlmodel

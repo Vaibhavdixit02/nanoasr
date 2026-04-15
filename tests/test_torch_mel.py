@@ -1,5 +1,5 @@
 import torch
-from nanoasr.mel import MelSpectrogramTransform
+from nanoasr.torch.mel import MelSpectrogramTransform
 
 
 def test_output_shape():

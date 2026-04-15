@@ -12,9 +12,9 @@ import numpy as np
 import sounddevice as sd
 import torch
 
-from nanoasr.decode import greedy_decode
-from nanoasr.mel import MelSpectrogramTransform
-from nanoasr.model import Conformer, get_device, load_model
+from nanoasr.torch.decode import greedy_decode
+from nanoasr.torch.mel import MelSpectrogramTransform
+from nanoasr.torch.model import Conformer, get_device, load_model
 
 
 SAMPLE_RATE = 16_000

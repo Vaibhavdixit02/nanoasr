@@ -1,19 +1,11 @@
 import os
 import random
-import re
 
 import torch
 import torchaudio
 
-from nanoasr.mel import MelSpectrogramTransform
-from nanoasr.vocab import encode
-
-
-def clean_text(text: str) -> str:
-    text = text.lower()
-    text = re.sub(r"[^a-z ]", "", text)
-    text = re.sub(r" +", " ", text)
-    return text.strip()
+from nanoasr.torch.mel import MelSpectrogramTransform
+from nanoasr.vocab import clean_text, encode
 
 
 class LibriSpeechDataset(torch.utils.data.Dataset):
