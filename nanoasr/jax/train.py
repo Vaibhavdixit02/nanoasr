@@ -55,7 +55,7 @@ def train_step(
         return jnp.mean(per_example)
 
     loss, grads = nnx.value_and_grad(loss_fn)(model)
-    optimizer.update(grads)
+    optimizer.update(grads, wrt=nnx.Param)
     return loss
 
 
