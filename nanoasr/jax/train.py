@@ -124,7 +124,7 @@ def train(
         optax.clip_by_global_norm(grad_clip),
         optax.adamw(learning_rate=schedule, weight_decay=0.01),
     )
-    optimizer = nnx.Optimizer(model, tx)
+    optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
 
     best_wer = float("inf")
     start_epoch = 0
