@@ -117,15 +117,22 @@ class BucketBatchSampler:
         return len(self.batches)
 
 
-def collate_fn(batch):
-    """Pad mels and targets to max length in batch, return numpy arrays."""
+def collate_fn(batch, pad_to=None):
+    """Pad mels and targets, return numpy arrays.
+
+    pad_to: optional (max_mel_T, max_target_S) for fixed-shape batches.
+    When set, every batch has identical shape so train_step compiles once.
+    """
     mels, targets = zip(*batch)
 
     mel_lengths = np.array([m.shape[1] for m in mels], dtype=np.int32)
     target_lengths = np.array([len(t) for t in targets], dtype=np.int32)
 
-    max_mel = max(m.shape[1] for m in mels)
-    max_tgt = max(len(t) for t in targets)
+    if pad_to is not None:
+        max_mel, max_tgt = pad_to
+    else:
+        max_mel = max(m.shape[1] for m in mels)
+        max_tgt = max(len(t) for t in targets)
 
     B = len(mels)
     mels_padded = np.zeros((B, 80, max_mel), dtype=np.float32)
@@ -138,10 +145,46 @@ def collate_fn(batch):
     return mels_padded, mel_lengths, targets_padded, target_lengths
 
 
-def make_loader(dataset, batch_size, shuffle=True):
-    """Simple generator that yields batches of numpy arrays."""
+def compute_dataset_maxes(dataset, audio_percentile=99):
+    """Return (max_audio_samples, max_mel_T, max_target_S) for fixed-shape batching.
+
+    Clips longer than the percentile are dropped by make_loader; padding to
+    the 99th percentile avoids one 30s outlier forcing every batch to that size.
+    """
+    from nanoasr.vocab import encode
+
+    audio_lengths = dataset.get_lengths()
+    max_audio = int(np.percentile(audio_lengths, audio_percentile))
+    hop = dataset.mel_transform.hop_length
+    max_mel_T = max_audio // hop + 2
+
+    text_lengths = np.array(
+        [len(encode(text)) for _, text in dataset.samples], dtype=np.int32,
+    )
+    # Restrict to samples we'll actually see after filtering.
+    kept_mask = audio_lengths <= max_audio
+    max_target_S = int(text_lengths[kept_mask].max()) + 1
+
+    return max_audio, max_mel_T, max_target_S
+
+
+def make_loader(dataset, batch_size, shuffle=True, pad_to=None,
+                max_audio_samples=None):
+    """Simple generator that yields batches of numpy arrays.
+
+    pad_to: forwarded to collate_fn for fixed-shape batches.
+    max_audio_samples: drop utterances longer than this many raw audio samples.
+    """
     lengths = dataset.get_lengths()
-    sampler = BucketBatchSampler(lengths, batch_size, shuffle=shuffle)
+
+    if max_audio_samples is not None:
+        valid_indices = np.where(lengths <= max_audio_samples)[0]
+    else:
+        valid_indices = np.arange(len(lengths))
+
+    filtered_lengths = lengths[valid_indices]
+    sampler = BucketBatchSampler(filtered_lengths, batch_size, shuffle=shuffle)
     for batch_indices in sampler:
-        items = [dataset[i] for i in batch_indices]
-        yield collate_fn(items)
+        actual_indices = [int(valid_indices[i]) for i in batch_indices]
+        items = [dataset[i] for i in actual_indices]
+        yield collate_fn(items, pad_to=pad_to)

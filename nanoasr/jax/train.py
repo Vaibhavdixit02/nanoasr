@@ -6,7 +6,11 @@ import jax.numpy as jnp
 import flax.nnx as nnx
 import optax
 
-from nanoasr.jax.data import LibriSpeechDataset, make_loader
+from nanoasr.jax.data import (
+    LibriSpeechDataset,
+    compute_dataset_maxes,
+    make_loader,
+)
 from nanoasr.jax.eval import evaluate
 from nanoasr.jax.model import (
     Conformer,
@@ -104,6 +108,16 @@ def train(
             f"Eval: {len(eval_ds)} utterances ({eval_data})"
         )
 
+    # Fixed-shape batching: one JIT compile for the whole run instead of one
+    # per unique (mel_T, target_S). Drops the top 1% longest clips so the pad
+    # ceiling is reasonable.
+    max_audio_samples, max_mel_T, max_target_S = compute_dataset_maxes(train_ds)
+    pad_to = (max_mel_T, max_target_S)
+    print(
+        f"Fixed pad: max_mel_T={max_mel_T}, max_target_S={max_target_S} "
+        f"(dropping clips > {max_audio_samples / 16_000:.1f}s)"
+    )
+
     n_batches = len(train_ds.get_lengths()) // batch_size + 1
     total_steps = n_batches * epochs
     warmup_steps = max(total_steps // 10, 1)
@@ -155,7 +169,10 @@ def train(
         epoch_start = time.time()
         n_steps_epoch = 0
 
-        loader = make_loader(train_ds, batch_size, shuffle=True)
+        loader = make_loader(
+            train_ds, batch_size, shuffle=True,
+            pad_to=pad_to, max_audio_samples=max_audio_samples,
+        )
         for mels, mel_lengths, targets, target_lengths in loader:
             loss = train_step(
                 model,
@@ -200,7 +217,10 @@ def train(
         print(f"  checkpoint -> {last_ckpt_path}")
 
         if eval_ds is not None and (epoch + 1) % eval_every == 0:
-            eval_loader = make_loader(eval_ds, batch_size, shuffle=False)
+            eval_loader = make_loader(
+                eval_ds, batch_size, shuffle=False,
+                pad_to=pad_to, max_audio_samples=max_audio_samples,
+            )
             result = evaluate(model, eval_loader, log_samples=3)
             if result["wer"] < best_wer:
                 best_wer = result["wer"]
