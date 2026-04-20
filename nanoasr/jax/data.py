@@ -96,14 +96,21 @@ class LibriSpeechDataset:
 
 
 class BucketBatchSampler:
-    """Groups similar-length utterances to minimize padding waste."""
+    """Groups similar-length utterances to minimize padding waste.
 
-    def __init__(self, lengths, batch_size, shuffle=True):
+    drop_last=True ensures every batch has exactly batch_size items so
+    the leading B dim of the batch is constant — required to keep
+    train_step's JIT cache to a single entry.
+    """
+
+    def __init__(self, lengths, batch_size, shuffle=True, drop_last=True):
         self.shuffle = shuffle
         sorted_indices = sorted(range(len(lengths)), key=lambda i: lengths[i])
+        n = len(sorted_indices)
+        end = (n // batch_size) * batch_size if drop_last else n
         self.batches = [
             sorted_indices[i : i + batch_size]
-            for i in range(0, len(sorted_indices), batch_size)
+            for i in range(0, end, batch_size)
         ]
 
     def __iter__(self):
@@ -183,7 +190,9 @@ def make_loader(dataset, batch_size, shuffle=True, pad_to=None,
         valid_indices = np.arange(len(lengths))
 
     filtered_lengths = lengths[valid_indices]
-    sampler = BucketBatchSampler(filtered_lengths, batch_size, shuffle=shuffle)
+    sampler = BucketBatchSampler(
+        filtered_lengths, batch_size, shuffle=shuffle, drop_last=True,
+    )
     for batch_indices in sampler:
         actual_indices = [int(valid_indices[i]) for i in batch_indices]
         items = [dataset[i] for i in actual_indices]
