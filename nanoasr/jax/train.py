@@ -11,6 +11,7 @@ from nanoasr.jax.eval import evaluate
 from nanoasr.jax.model import (
     Conformer,
     ConformerConfig,
+    _restore_state,
     get_config,
     save_checkpoint,
 )
@@ -76,6 +77,7 @@ def train(
     save_dir: str = ".",
     resume: str | None = None,
     seed: int = 0,
+    max_steps: int | None = None,
 ):
     """Train a Conformer-CTC model with JAX on CPU / GPU / TPU.
 
@@ -135,8 +137,7 @@ def train(
 
         with open(resume, "rb") as f:
             ckpt = pickle.load(f)
-        loaded = jax.tree.map(jnp.array, ckpt["model_state"])
-        nnx.update(model, loaded)
+        _restore_state(model, ckpt["model_state"])
         start_epoch = ckpt.get("epoch", 0)
         step = ckpt.get("step", 0)
         best_wer = ckpt.get("best_wer", float("inf"))
@@ -177,6 +178,13 @@ def train(
                     f"step {step} | loss {float(loss):.4f} | "
                     f"lr {cur_lr:.2e} | {elapsed:.0f}s"
                 )
+
+            if max_steps is not None and step >= max_steps:
+                break
+
+        if max_steps is not None and step >= max_steps:
+            print(f"Reached max_steps={max_steps}, stopping early.")
+            break
 
         elapsed = time.time() - epoch_start
         avg_loss = epoch_loss / max(n_steps_epoch, 1)
