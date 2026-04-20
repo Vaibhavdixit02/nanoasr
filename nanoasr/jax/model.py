@@ -282,12 +282,22 @@ class Conformer(nnx.Module):
 # Checkpoint helpers
 # ---------------------------------------------------------------------------
 
+def _is_prng_key(x) -> bool:
+    return hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jax.dtypes.prng_key)
+
+
+def _leaf_to_np(x):
+    import numpy as np
+    if _is_prng_key(x):
+        return np.asarray(jax.random.key_data(x))
+    return np.asarray(x)
+
+
 def save_checkpoint(path: str, model: Conformer, config: ConformerConfig,
                     step: int, epoch: int, best_wer: float,
                     opt_state=None) -> None:
-    import numpy as np
     _, state = nnx.split(model)
-    np_state = jax.tree.map(lambda x: np.array(x), state)
+    np_state = jax.tree.map(_leaf_to_np, state)
     ckpt = {
         "model_state": np_state,
         "config": config,
@@ -296,9 +306,22 @@ def save_checkpoint(path: str, model: Conformer, config: ConformerConfig,
         "best_wer": best_wer,
     }
     if opt_state is not None:
-        ckpt["opt_state"] = jax.tree.map(lambda x: np.array(x), opt_state)
+        ckpt["opt_state"] = jax.tree.map(_leaf_to_np, opt_state)
     with open(path, "wb") as f:
         pickle.dump(ckpt, f)
+
+
+def _restore_state(model: "Conformer", saved_model_state) -> None:
+    """Re-wrap PRNG key leaves and update model in-place."""
+    _, fresh_state = nnx.split(model)
+
+    def _from_np(np_leaf, fresh_leaf):
+        if _is_prng_key(fresh_leaf):
+            return jax.random.wrap_key_data(jnp.asarray(np_leaf))
+        return jnp.asarray(np_leaf)
+
+    loaded = jax.tree.map(_from_np, saved_model_state, fresh_state)
+    nnx.update(model, loaded)
 
 
 def load_model(checkpoint_path: str, rngs: nnx.Rngs | None = None) -> Conformer:
@@ -309,8 +332,7 @@ def load_model(checkpoint_path: str, rngs: nnx.Rngs | None = None) -> Conformer:
         ckpt = pickle.load(f)
     config = ckpt["config"]
     model = Conformer(config, rngs=rngs)
-    loaded_state = jax.tree.map(jnp.array, ckpt["model_state"])
-    nnx.update(model, loaded_state)
+    _restore_state(model, ckpt["model_state"])
     n_params = sum(x.size for x in jax.tree.leaves(nnx.state(model, nnx.Param)))
     print(f"Loaded model (depth={config.depth}, {n_params:,} params)")
     return model
