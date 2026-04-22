@@ -16,8 +16,12 @@ dependencies = [
 
 [project.optional-dependencies]
 live = ["sounddevice>=0.4"]
+jax = ["jax>=0.4", "flax>=0.12", "optax>=0.2", "librosa>=0.10", "soundfile>=0.12"]
 dev = ["pytest", "matplotlib", "ipykernel"]
 
 [project.scripts]
-nanoasr-live = "nanoasr.live:main"
-nanoasr-transcribe = "nanoasr.transcribe:main"
+nanoasr-live = "nanoasr.torch.live:main"
+nanoasr-transcribe = "nanoasr.torch.transcribe:main"
+
+[tool.setuptools.packages.find]
+include = ["nanoasr*"]

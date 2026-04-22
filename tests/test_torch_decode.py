@@ -1,5 +1,5 @@
 import torch
-from nanoasr.decode import greedy_decode, greedy_decode_batch
+from nanoasr.torch.decode import greedy_decode, greedy_decode_batch
 from nanoasr.vocab import BLANK_IDX
 
 

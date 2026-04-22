@@ -1,3 +1,14 @@
+import re
+
+
+def clean_text(text: str) -> str:
+    """Lowercase, strip non-alpha/space, collapse whitespace."""
+    text = text.lower()
+    text = re.sub(r"[^a-z ]", "", text)
+    text = re.sub(r" +", " ", text)
+    return text.strip()
+
+
 VOCAB = list("abcdefghijklmnopqrstuvwxyz ") + ["<blank>"]
 BLANK_IDX = 27
 VOCAB_SIZE = 28

@@ -1,33 +1,34 @@
-import torch
-from torch.utils.data import DataLoader
+import numpy as np
+import jax
+import jax.numpy as jnp
 
-from nanoasr.data import LibriSpeechDataset, collate_fn
-from nanoasr.decode import greedy_decode_batch
+from nanoasr.jax.data import LibriSpeechDataset, make_loader
+from nanoasr.jax.decode import greedy_decode_batch
+from nanoasr.jax.model import Conformer, load_model
 from nanoasr.metrics import char_error_rate, word_error_rate
-from nanoasr.model import Conformer, get_device
 from nanoasr.vocab import decode_indices
 
 
-@torch.no_grad()
 def evaluate(
     model: Conformer,
-    eval_loader: DataLoader,
-    device: str = "cuda",
+    eval_loader,
     log_samples: int = 5,
 ) -> dict:
     """Run greedy CTC decode on an eval set and return WER/CER."""
-    model.eval()
     all_refs: list[str] = []
     all_hyps: list[str] = []
 
     for mels, mel_lengths, targets, target_lengths in eval_loader:
-        mels = mels.to(device)
-        mel_lengths = mel_lengths.to(device)
-        log_probs = model(mels, mel_lengths)
+        mels_j = jnp.array(mels)
+        mel_lengths_j = jnp.array(mel_lengths)
+
+        logits = model(mels_j, mel_lengths_j, deterministic=True)
+        log_probs = jax.nn.log_softmax(logits, axis=-1)
         input_lengths = mel_lengths // 4
-        hyps = greedy_decode_batch(log_probs.cpu(), input_lengths)
+
+        hyps = greedy_decode_batch(np.array(log_probs), input_lengths)
         for i in range(len(hyps)):
-            ref = decode_indices(targets[i][:target_lengths[i]].tolist())
+            ref = decode_indices(targets[i][: target_lengths[i]].tolist())
             all_refs.append(ref)
             all_hyps.append(hyps[i])
 
@@ -49,22 +50,10 @@ def evaluate_checkpoint(
     eval_split: str = "dev-clean",
     data_root: str = "./data",
     batch_size: int = 16,
-    num_workers: int = 2,
-    device: str | None = None,
 ) -> dict:
     """Load a saved checkpoint and evaluate it."""
-    device = get_device(device)
-
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    config = ckpt["config"]
-    model = Conformer(config).to(device)
-    model.load_state_dict(ckpt["model_state_dict"])
-
+    model = load_model(checkpoint_path)
     eval_ds = LibriSpeechDataset(root=data_root, split=eval_split)
-    eval_loader = DataLoader(
-        eval_ds, batch_size=batch_size, shuffle=False,
-        collate_fn=collate_fn, num_workers=num_workers,
-    )
-
+    eval_loader = make_loader(eval_ds, batch_size, shuffle=False)
     print(f"Evaluating {checkpoint_path} on {eval_split} ({len(eval_ds)} utterances)")
-    return evaluate(model, eval_loader, device=device)
+    return evaluate(model, eval_loader)

@@ -1,4 +1,4 @@
-from nanoasr.data import clean_text
+from nanoasr.vocab import clean_text
 
 
 def test_clean_text_lowercase():
