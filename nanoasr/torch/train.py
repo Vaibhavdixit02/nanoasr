@@ -1,4 +1,5 @@
 import argparse
+import json
 import math
 import os
 import time
@@ -22,7 +23,8 @@ def _get_lr(step: int, warmup_steps: int, total_steps: int, peak_lr: float) -> f
     return peak_lr * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
-def _save_checkpoint(path, model, config, optimizer, scaler, step, epoch, best_wer):
+def _save_checkpoint(path, model, config, optimizer, scaler, step, epoch,
+                     best_wer, total_elapsed_sec=0.0):
     """Save a full training checkpoint (model + optimizer + training state)."""
     raw_model = getattr(model, "_orig_mod", model)
     torch.save({
@@ -33,6 +35,7 @@ def _save_checkpoint(path, model, config, optimizer, scaler, step, epoch, best_w
         "step": step,
         "epoch": epoch,
         "best_wer": best_wer,
+        "total_elapsed_sec": total_elapsed_sec,
     }, path)
 
 
@@ -110,6 +113,7 @@ def train(
     best_wer = float("inf")
     start_epoch = 0
     step = 0
+    prev_elapsed_sec = 0.0
 
     if resume and os.path.isfile(resume):
         ckpt = torch.load(resume, map_location=device, weights_only=False)
@@ -121,6 +125,7 @@ def train(
         start_epoch = ckpt.get("epoch", 0)
         step = ckpt.get("step", 0)
         best_wer = ckpt.get("best_wer", ckpt.get("wer", float("inf")))
+        prev_elapsed_sec = ckpt.get("total_elapsed_sec", 0.0)
         print(f"Resumed from {resume} (epoch {start_epoch}, step {step}, best_wer {best_wer:.2%})")
 
     if compile and device == "cuda":
@@ -130,6 +135,8 @@ def train(
     # --- training loop --------------------------------------------------------
     last_ckpt_path = os.path.join(save_dir, f"model_depth{depth}_last.pt")
     best_ckpt_path = os.path.join(save_dir, f"model_depth{depth}_best.pt")
+    log_path = os.path.join(save_dir, f"training_log_depth{depth}.jsonl")
+    run_start = time.time()
 
     for epoch in range(start_epoch, epochs):
         model.train()
@@ -171,26 +178,42 @@ def train(
                 print(f"step {step} | loss {loss.item():.4f} | lr {current_lr:.2e} | {elapsed:.0f}s")
 
         elapsed = time.time() - epoch_start
+        total_elapsed = prev_elapsed_sec + (time.time() - run_start)
         avg_loss = epoch_loss / len(train_loader)
         utts_per_sec = len(train_ds) / elapsed
         print(f"epoch {epoch + 1}/{epochs} | avg_loss {avg_loss:.4f} | "
               f"{elapsed:.0f}s ({utts_per_sec:.0f} utt/s)")
 
         _save_checkpoint(last_ckpt_path, model, config, optimizer, scaler,
-                         step, epoch + 1, best_wer)
+                         step, epoch + 1, best_wer, total_elapsed)
         print(f"  checkpoint -> {last_ckpt_path}")
 
+        eval_wer = None
         if eval_loader is not None and (epoch + 1) % eval_every == 0:
             result = evaluate(model, eval_loader, device=device, log_samples=3)
-            if result["wer"] < best_wer:
-                best_wer = result["wer"]
+            eval_wer = result["wer"]
+            if eval_wer < best_wer:
+                best_wer = eval_wer
                 _save_checkpoint(best_ckpt_path, model, config, optimizer,
-                                 scaler, step, epoch + 1, best_wer)
+                                 scaler, step, epoch + 1, best_wer, total_elapsed)
                 print(f"  New best WER: {best_wer:.2%} -> saved {best_ckpt_path}")
 
+        with open(log_path, "a") as f:
+            f.write(json.dumps({
+                "timestamp": time.time(),
+                "epoch": epoch + 1,
+                "step": step,
+                "avg_loss": avg_loss,
+                "epoch_elapsed_sec": elapsed,
+                "total_elapsed_sec": total_elapsed,
+                "utts_per_sec": utts_per_sec,
+                "wer": eval_wer,
+            }) + "\n")
+
     final_path = os.path.join(save_dir, f"model_depth{depth}.pt")
+    total_elapsed = prev_elapsed_sec + (time.time() - run_start)
     _save_checkpoint(final_path, model, config, optimizer, scaler,
-                     step, epochs, best_wer)
+                     step, epochs, best_wer, total_elapsed)
     print(f"Saved final checkpoint to {final_path}")
     if best_wer < float("inf"):
         print(f"Best eval WER: {best_wer:.2%}")
