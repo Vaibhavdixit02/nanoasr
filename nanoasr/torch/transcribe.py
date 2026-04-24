@@ -32,24 +32,26 @@ def transcribe_file(model: Conformer, audio_path: str,
     return text, duration, elapsed
 
 
+def transcribe_paths(checkpoint: str, audio_paths: list[str], device: str | None = None) -> None:
+    resolved_device = get_device(device)
+    model = load_model(checkpoint, resolved_device)
+    mel_transform = MelSpectrogramTransform()
+
+    for path in audio_paths:
+        text, duration, elapsed = transcribe_file(model, path, mel_transform, resolved_device)
+        rtf = elapsed / duration
+        print(f"\n  File:    {path} ({duration:.1f}s)")
+        print(f"  Result:  {text}")
+        print(f"  Time:    {elapsed*1000:.0f}ms (RTF={rtf:.3f})")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Transcribe audio files")
     parser.add_argument("checkpoint", help="Path to model checkpoint")
     parser.add_argument("audio", nargs="+", help="Audio file(s) to transcribe")
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
-
-    device = get_device(args.device)
-
-    model = load_model(args.checkpoint, device)
-    mel_transform = MelSpectrogramTransform()
-
-    for path in args.audio:
-        text, duration, elapsed = transcribe_file(model, path, mel_transform, device)
-        rtf = elapsed / duration
-        print(f"\n  File:    {path} ({duration:.1f}s)")
-        print(f"  Result:  {text}")
-        print(f"  Time:    {elapsed*1000:.0f}ms (RTF={rtf:.3f})")
+    transcribe_paths(args.checkpoint, args.audio, args.device)
 
 
 if __name__ == "__main__":

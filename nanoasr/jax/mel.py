@@ -1,4 +1,11 @@
+import os
+import tempfile
+
 import numpy as np
+
+
+os.environ.setdefault("NUMBA_CACHE_DIR", os.path.join(tempfile.gettempdir(), "numba-cache"))
+
 import librosa
 
 

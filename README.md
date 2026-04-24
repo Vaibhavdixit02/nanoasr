@@ -44,6 +44,14 @@ Set `--lr 0` (default) for auto-scaling to `5e-4`. Use `--resume` to continue fr
 
 ```bash
 python -m nanoasr transcribe model_depth4_best.pt recording.wav
+python -m nanoasr transcribe model_depth8_best.pkl recording.wav
+```
+
+`transcribe` auto-detects the backend from the checkpoint suffix:
+`.pt` -> PyTorch, `.pkl` -> JAX. For JAX checkpoints, install the optional deps:
+
+```bash
+pip install -e ".[jax]"
 ```
 
 ## Live transcription (microphone)
@@ -54,9 +62,17 @@ Record from your mic and transcribe in real time with a trained checkpoint:
 brew install portaudio           # macOS prerequisite
 pip install -e ".[live]"
 python -m nanoasr.live model_depth4_best.pt
+python -m nanoasr live model_depth8_best.pkl
 ```
 
 Push-to-talk: press Enter to start recording, Enter again to stop. Works on macOS and Linux.
+`.pt` checkpoints use the PyTorch backend, `.pkl` checkpoints use the JAX backend.
+
+For JAX live transcription, install both optional dependency sets:
+
+```bash
+pip install -e ".[live,jax]"
+```
 
 ## Evaluate a checkpoint
 

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import sys
 
 import torch
 import torch.nn as nn
@@ -20,6 +21,7 @@ def get_device(device: str | None = None) -> str:
 
 def load_model(checkpoint_path: str, device: str) -> "Conformer":
     """Load a Conformer from a saved checkpoint."""
+    sys.modules.setdefault("nanoasr.model", sys.modules[__name__])
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if isinstance(ckpt, dict) and "config" in ckpt:
         config = ckpt["config"]

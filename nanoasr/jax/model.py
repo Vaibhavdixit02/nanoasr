@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
 import pickle
 
@@ -320,8 +321,25 @@ def _restore_state(model: "Conformer", saved_model_state) -> None:
             return jax.random.wrap_key_data(jnp.asarray(np_leaf))
         return jnp.asarray(np_leaf)
 
-    loaded = jax.tree.map(_from_np, saved_model_state, fresh_state)
-    nnx.update(model, loaded)
+    try:
+        loaded = jax.tree.map(_from_np, saved_model_state, fresh_state)
+        nnx.update(model, loaded)
+    except ValueError:
+        # Older checkpoints can carry RNG state with a different container
+        # layout than the current flax.nnx runtime. In that case we keep the
+        # fresh RNG structure and restore the saved weights/statistics.
+        nnx.update(model, _merge_compatible_state(saved_model_state, fresh_state))
+
+
+def _merge_compatible_state(saved_node, fresh_node):
+    if isinstance(saved_node, Mapping) and isinstance(fresh_node, Mapping):
+        if set(saved_node.keys()) != set(fresh_node.keys()):
+            return fresh_node
+        return type(fresh_node)({
+            key: _merge_compatible_state(saved_node[key], fresh_node[key])
+            for key in fresh_node.keys()
+        })
+    return saved_node
 
 
 def load_model(checkpoint_path: str, rngs: nnx.Rngs | None = None) -> Conformer:
