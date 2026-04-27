@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from nanoasr import vocab as _vocab
 from nanoasr.vocab import VOCAB_SIZE
 
 
@@ -29,11 +30,14 @@ def load_model(checkpoint_path: str, device: str) -> "Conformer":
     else:
         config = get_config(depth=4)
         state_dict = ckpt
+    _vocab.set_tokenizer(_vocab.load_tokenizer_from_config(config))
     model = Conformer(config).to(device)
     model.load_state_dict(state_dict)
     model.eval()
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Loaded model (depth={config.depth}, {n_params:,} params) on {device}")
+    tok_kind = _vocab.get_tokenizer().type
+    print(f"Loaded model (depth={config.depth}, {n_params:,} params, "
+          f"vocab={config.vocab_size} {tok_kind}) on {device}")
     return model
 
 
@@ -98,14 +102,19 @@ class ConformerConfig:
     ff_mult: int = 4
     dropout: float = 0.1
     vocab_size: int = VOCAB_SIZE
+    # Tokenizer descriptor — checkpoints become self-describing so that
+    # transcribe/eval/live can rebuild the right encoder/decoder.
+    tokenizer_type: str = "char"          # "char" or "bpe"
+    spm_model_path: str | None = None     # absolute path to the spm .model
 
 
-def get_config(depth: int) -> ConformerConfig:
+def get_config(depth: int, vocab_size: int = VOCAB_SIZE) -> ConformerConfig:
     return ConformerConfig(
         depth=depth,
         d_model=depth * 32,
         n_heads=depth,
         n_layers=depth,
+        vocab_size=vocab_size,
     )
 
 

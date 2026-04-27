@@ -16,8 +16,10 @@ dependencies = [
 
 [project.optional-dependencies]
 live = ["sounddevice>=0.4"]
+bpe = ["sentencepiece>=0.2"]
+lm = ["kenlm>=0.1"]
 jax = ["jax>=0.4", "flax>=0.12", "optax>=0.2", "librosa>=0.10", "soundfile>=0.12"]
-dev = ["pytest", "matplotlib", "ipykernel"]
+dev = ["pytest", "matplotlib", "ipykernel", "sentencepiece>=0.2"]
 
 [project.scripts]
 nanoasr-live = "nanoasr.live:main"

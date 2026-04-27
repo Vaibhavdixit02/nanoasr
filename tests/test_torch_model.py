@@ -15,7 +15,14 @@ def test_get_config_depth4():
     assert cfg.d_model == 128
     assert cfg.n_heads == 4
     assert cfg.n_layers == 4
-    assert cfg.vocab_size == 28
+    assert cfg.vocab_size == 28  # default char vocab
+    assert cfg.tokenizer_type == "char"
+    assert cfg.spm_model_path is None
+
+
+def test_get_config_with_vocab_size():
+    cfg = get_config(4, vocab_size=1024)
+    assert cfg.vocab_size == 1024
 
 
 def test_get_config_depth12():
@@ -80,7 +87,7 @@ def test_forward_pass_depth4():
     model = Conformer(config)
     mel = torch.randn(2, 80, 500)
     log_probs = model(mel)
-    assert log_probs.shape == (2, 125, 28)
+    assert log_probs.shape == (2, 125, config.vocab_size)
     assert torch.allclose(
         log_probs.exp().sum(dim=-1),
         torch.ones(2, 125), atol=1e-5,
@@ -92,7 +99,7 @@ def test_forward_pass_depth8():
     model = Conformer(config)
     mel = torch.randn(2, 80, 500)
     log_probs = model(mel)
-    assert log_probs.shape == (2, 125, 28)
+    assert log_probs.shape == (2, 125, config.vocab_size)
 
 
 def test_param_count_depth4():
@@ -110,4 +117,4 @@ def test_variable_length_input():
         mel = torch.randn(1, 80, T)
         log_probs = model(mel)
         assert log_probs.shape[1] == T // 4
-        assert log_probs.shape[2] == 28
+        assert log_probs.shape[2] == config.vocab_size

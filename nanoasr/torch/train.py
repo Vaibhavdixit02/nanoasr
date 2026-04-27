@@ -9,10 +9,53 @@ _DEFAULT_WORKERS = min(4, os.cpu_count() or 1)
 import torch
 from torch.utils.data import DataLoader
 
+from nanoasr import vocab as _vocab
 from nanoasr.torch.data import BucketBatchSampler, LibriSpeechDataset, collate_fn
 from nanoasr.torch.eval import evaluate
 from nanoasr.torch.model import Conformer, get_config, get_device
-from nanoasr.vocab import BLANK_IDX
+
+
+def _iter_transcripts(dataset: LibriSpeechDataset):
+    """Yield raw transcripts from a LibriSpeech split without loading audio."""
+    base = dataset.dataset
+    seen: set[str] = set()
+    for fileid in base._walker:
+        speaker, chapter, _ = fileid.split("-")
+        trans_path = os.path.join(
+            base._path, speaker, chapter,
+            f"{speaker}-{chapter}{base._ext_txt}",
+        )
+        if trans_path in seen:
+            continue
+        seen.add(trans_path)
+        with open(trans_path) as f:
+            for line in f:
+                _, transcript = line.strip().split(" ", 1)
+                yield transcript
+
+
+def ensure_bpe_tokenizer(
+    data_root: str,
+    train_split: str,
+    vocab_size: int,
+) -> _vocab.BPETokenizer:
+    """Load (or train) the SentencePiece BPE model for ``train_split``.
+
+    Trains on first call; subsequent calls just load. The trained model is
+    cached at ``<data_root>/spm_<vocab_size>.model``.
+    """
+    spm_path = _vocab.spm_model_path(data_root, vocab_size)
+    if not spm_path.is_file():
+        print(f"Training BPE tokenizer (vocab_size={vocab_size}) on {train_split} "
+              f"→ {spm_path}")
+        ds = LibriSpeechDataset(root=data_root, split=train_split)
+        sentences = list(_iter_transcripts(ds))
+        print(f"  {len(sentences)} transcripts collected")
+        _vocab.train_bpe(sentences, vocab_size, spm_path)
+    tok = _vocab.BPETokenizer(spm_path)
+    _vocab.set_tokenizer(tok)
+    print(f"Active tokenizer: BPE, vocab_size={tok.vocab_size}")
+    return tok
 
 
 def _get_lr(step: int, warmup_steps: int, total_steps: int, peak_lr: float) -> float:
@@ -54,6 +97,7 @@ def train(
     save_dir: str = ".",
     resume: str | None = None,
     compile: bool = True,
+    vocab_size: int = 1024,
 ):
     """Train a Conformer-CTC model. Callable from notebooks or CLI.
 
@@ -62,8 +106,12 @@ def train(
             on Colab so checkpoints survive disconnects.
         resume: Path to a checkpoint to resume training from.
         compile: Use torch.compile for faster training (requires CUDA).
+        vocab_size: BPE vocabulary size (auto-trains on first run).
     """
-    config = get_config(depth)
+    tokenizer = ensure_bpe_tokenizer(data_root, data, vocab_size)
+    config = get_config(depth, vocab_size=tokenizer.vocab_size)
+    config.tokenizer_type = "bpe"
+    config.spm_model_path = tokenizer.model_path
     peak_lr = lr if lr > 0 else 5e-4
     device = get_device(device)
     use_amp = device == "cuda"
@@ -108,7 +156,7 @@ def train(
     warmup_steps = max(total_steps // 10, 1)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
-    ctc_loss_fn = torch.nn.CTCLoss(blank=BLANK_IDX, zero_infinity=True)
+    ctc_loss_fn = torch.nn.CTCLoss(blank=tokenizer.blank_idx, zero_infinity=True)
 
     best_wer = float("inf")
     start_epoch = 0
@@ -237,6 +285,8 @@ def parse_args():
                    help="Path to checkpoint to resume training from")
     p.add_argument("--no-compile", action="store_true",
                    help="Disable torch.compile")
+    p.add_argument("--vocab-size", type=int, default=1024,
+                   help="BPE vocabulary size (auto-trains on first run)")
     return p.parse_args()
 
 
@@ -256,7 +306,32 @@ def main():
         save_dir=args.save_dir,
         resume=args.resume,
         compile=not args.no_compile,
+        vocab_size=args.vocab_size,
     )
+
+
+def train_bpe_main():
+    """CLI entry point for ``python -m nanoasr train-bpe``."""
+    p = argparse.ArgumentParser(description="Train a SentencePiece BPE tokenizer")
+    p.add_argument("--data", type=str, default="train-clean-100",
+                   help="LibriSpeech split to use as training corpus")
+    p.add_argument("--vocab-size", type=int, default=1024)
+    p.add_argument("--data-root", type=str, default="./data")
+    p.add_argument("--character-coverage", type=float, default=1.0)
+    args = p.parse_args()
+
+    spm_path = _vocab.spm_model_path(args.data_root, args.vocab_size)
+    if spm_path.is_file():
+        print(f"BPE model already exists at {spm_path}; nothing to do.")
+        return
+
+    ds = LibriSpeechDataset(root=args.data_root, split=args.data)
+    sentences = list(_iter_transcripts(ds))
+    print(f"Training BPE on {len(sentences)} transcripts (vocab_size={args.vocab_size}) "
+          f"→ {spm_path}")
+    _vocab.train_bpe(sentences, args.vocab_size, spm_path,
+                     character_coverage=args.character_coverage)
+    print(f"Wrote {spm_path}")
 
 
 if __name__ == "__main__":
