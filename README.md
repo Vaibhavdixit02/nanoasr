@@ -1,8 +1,10 @@
 # nanoasr
 
-A minimal, hackable speech recognizer. Train a Conformer-CTC model on LibriSpeech from scratch in ~1000 lines of Python.
+A minimal, hackable speech recognizer. Train a hybrid CTC + attention encoder-decoder Conformer on LibriSpeech from scratch.
 
 Like [nanoGPT](https://github.com/karpathy/nanoGPT) but for speech-to-text — small enough to understand every line, real enough to produce actual transcriptions. Built for learning, experimenting, and scaling up.
+
+The default model is the recipe most modern open-source ASR (Whisper, ESPnet, NeMo Parakeet) ships at production scale, just shrunk down: a Conformer encoder with a small Transformer decoder, joint `λ·CTC + (1-λ)·CE` training, BPE targets, and joint AED + CTC beam search at inference time.
 
 ## Quick start (Colab)
 
@@ -13,11 +15,13 @@ The fastest way to train is on a free Colab GPU:
 ## Quick start (local)
 
 ```bash
-pip install -e .
+pip install -e ".[bpe]"
 python -m nanoasr --depth 4 --epochs 50
 ```
 
 This trains a depth-4 Conformer (~3M params) on LibriSpeech `train-clean-100` with eval on `dev-clean`. Data downloads automatically on first run.
+
+The first invocation also auto-trains a 1024-piece SentencePiece BPE tokenizer on the training transcripts and caches it at `data/spm_1024.model` (or run `python -m nanoasr train-bpe` ahead of time). Subsequent runs reuse the cached model.
 
 All arguments:
 
@@ -29,6 +33,9 @@ python -m nanoasr \
     --data-root ./data \
     --epochs 50 \
     --batch-size 64 \
+    --vocab-size 1024 \
+    --ctc-weight 0.3 \
+    --label-smoothing 0.1 \
     --lr 0.0 \
     --grad-clip 5.0 \
     --eval-every 5 \
@@ -38,17 +45,33 @@ python -m nanoasr \
     --no-compile
 ```
 
-Set `--lr 0` (default) for auto-scaling to `5e-4`. Use `--resume` to continue from a checkpoint. `torch.compile` is enabled by default on CUDA.
+Set `--lr 0` (default) for auto-scaling to `5e-4`. Use `--resume` to continue from a checkpoint. `torch.compile` is enabled by default on CUDA. `--ctc-weight` is the λ in `λ·CTC + (1-λ)·CE`; ESPnet's default of 0.3 is a good starting point.
 
 ## Transcribe audio files
 
 ```bash
 python -m nanoasr transcribe model_depth4_best.pt recording.wav
+python -m nanoasr transcribe --decoder beam --beam-width 5 model_depth4_best.pt recording.wav
 python -m nanoasr transcribe model_depth8_best.pkl recording.wav
 ```
 
 `transcribe` auto-detects the backend from the checkpoint suffix:
-`.pt` -> PyTorch, `.pkl` -> JAX. For JAX checkpoints, install the optional deps:
+`.pt` -> PyTorch, `.pkl` -> JAX. By default decoding uses CTC greedy (fastest);
+`--decoder beam` switches to joint AED+CTC beam search, which is materially
+better at the cost of a small constant-factor slowdown. With a KenLM model
+on disk you can also enable shallow fusion:
+
+```bash
+python -m nanoasr transcribe --decoder beam --beam-width 8 \
+    --lm-path lm/4gram.bin --lm-weight 0.5 \
+    model_depth4_best.pt recording.wav
+```
+
+Beam search degrades gracefully: legacy CTC-only checkpoints (no AED head)
+fall back to standard CTC prefix beam search; missing or unreadable
+`--lm-path` is logged and ignored.
+
+For JAX checkpoints, install the optional deps:
 
 ```bash
 pip install -e ".[jax]"
@@ -106,42 +129,57 @@ HYP: he tells us that at this festive season of the year with christmiss
 
 ## Architecture
 
-**Conformer-CTC** — the single `depth` parameter controls everything:
+**Hybrid CTC + Attention encoder-decoder Conformer.** A single `depth` knob scales the encoder *and* the decoder:
 
-| depth | d_model | n_heads | n_layers | ~params |
-|-------|---------|---------|----------|---------|
-| 4     | 128     | 4       | 4        | 3M      |
-| 8     | 256     | 8       | 8        | 10M     |
-| 12    | 384     | 12      | 12       | 33M     |
+| depth | d_model | n_heads | n_layers (enc) | n_layers (dec) | ~params |
+|-------|---------|---------|----------------|----------------|---------|
+| 4     | 128     | 4       | 4              | 2              | 3M      |
+| 8     | 256     | 8       | 8              | 4              | 11M     |
+| 12    | 384     | 12      | 12             | 6              | 35M     |
 
 ```
 audio → mel spectrogram (80 bins, 10ms hop)
       → SpecAugment (freq + time masking, training only)
       → ConvStem (4x time downsample)
       → N × ConformerBlock (Macaron FF → MHSA w/ RoPE → DepthwiseConv → FF)
-      → Linear → log_softmax → CTC greedy decode
+      ├── Linear → log_softmax → CTC head
+      └── M × TransformerDecoderLayer (masked self-attn → cross-attn → FF)
+              → tied projection → AED logits
+
+joint loss = λ · CTC + (1-λ) · CE   (default λ = 0.3, label-smoothing 0.1)
 ```
 
-**Training features:** bucket batching, cosine LR with warmup, gradient clipping, mixed precision (AMP), `torch.compile`, attention padding masks, SpecAugment, best-checkpoint saving by WER.
+**Vocabulary:** 1024-piece SentencePiece BPE (auto-trained on first run from
+the training transcripts). Special-token slots follow the ESPnet convention:
+`<blank>=0`, `<unk>=1`, `<sos>=2`, `<eos>=3`. Legacy 28-char checkpoints still
+load via the char-vocab fallback.
 
-**Vocabulary:** 28 characters (a–z, space, blank). No tokenizer.
+**Decoders:** CTC greedy (default for live, lowest latency), label-synchronous
+greedy AED (eval-only), and joint AED+CTC beam search with optional KenLM
+shallow fusion (default for transcribe and eval).
+
+**Training features:** bucket batching, cosine LR with warmup, gradient clipping, mixed precision (AMP), `torch.compile`, attention padding masks, SpecAugment, best-checkpoint saving by WER.
 
 ## File structure
 
 ```
 nanoasr/
-├── model.py        # Conformer encoder + SpecAugment (~260 lines)
-├── train.py        # Training loop with CTC loss (~240 lines)
-├── data.py         # LibriSpeech dataset, bucket batching, collation
-├── eval.py         # WER/CER evaluation loop
-├── mel.py          # Log-mel spectrogram transform
-├── vocab.py        # 28-char CTC vocabulary
-├── decode.py       # Greedy CTC decoding
-├── metrics.py      # Edit-distance WER & CER (no deps)
-├── transcribe.py   # File-based transcription CLI
-├── live.py         # Push-to-talk mic transcription
-└── __main__.py     # python -m nanoasr entrypoint
-train.ipynb         # Colab notebook
+├── torch/
+│   ├── model.py     # Conformer encoder + AED Transformer decoder + SpecAugment
+│   ├── train.py     # Joint CTC+CE training loop, BPE auto-train, train-bpe CLI
+│   ├── data.py      # LibriSpeech dataset, bucket batching, collation
+│   ├── eval.py      # WER/CER evaluation; CTC greedy / AED greedy / beam decode
+│   ├── decode.py    # Greedy CTC, greedy AED, joint AED+CTC beam search
+│   ├── transcribe.py
+│   ├── live.py
+│   └── mel.py
+├── jax/             # JAX backend (CTC-only mirror of the legacy torch path)
+├── vocab.py         # SentencePiece BPE + 28-char fallback tokenizers
+├── metrics.py       # Edit-distance WER & CER (no deps)
+├── transcribe.py    # Backend dispatcher
+├── live.py
+└── __main__.py      # python -m nanoasr entrypoint
+train.ipynb          # Colab notebook
 pyproject.toml
 ```
 
@@ -154,10 +192,12 @@ pyproject.toml
 - [x] Proper train/eval splits with WER/CER metrics
 - [x] Checkpoint resume for crash resilience
 - [x] File transcription and live push-to-talk mic demo
+- [x] BPE tokenizer (SentencePiece, ESPnet-style special-token slots)
+- [x] Hybrid CTC + attention encoder-decoder, joint training loss
+- [x] Joint AED + CTC beam search with optional KenLM shallow fusion
+- [ ] JAX backend parity for the AED head
 - [ ] Train on full LibriSpeech 960h
 - [ ] Multi-GPU / DDP training
-- [ ] BPE tokenizer
-- [ ] Beam search + language model decoding
 - [ ] Streaming / chunked inference
 
 ## License

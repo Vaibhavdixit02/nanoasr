@@ -20,6 +20,16 @@ def main():
                         help="Inference backend (default: infer from checkpoint suffix)")
     parser.add_argument("--device", default=None,
                         help="Torch device override (default: cuda > mps > cpu)")
+    parser.add_argument("--decoder", choices=["greedy", "beam"], default="greedy",
+                        help="Decoding strategy (torch backend only)")
+    parser.add_argument("--beam-width", type=int, default=5,
+                        help="Beam width when --decoder=beam")
+    parser.add_argument("--ctc-weight", type=float, default=0.3,
+                        help="CTC weight in joint beam scoring")
+    parser.add_argument("--lm-path", default=None,
+                        help="Optional KenLM .arpa/.bin model for shallow fusion")
+    parser.add_argument("--lm-weight", type=float, default=0.0,
+                        help="LM weight for shallow fusion")
     args = parser.parse_args()
 
     backend = detect_backend(args.checkpoint, args.backend)
@@ -27,11 +37,15 @@ def main():
     if backend == "jax":
         if args.device is not None:
             parser.error("--device is only supported for Torch checkpoints")
+        if args.decoder != "greedy":
+            parser.error("--decoder=beam is only supported for Torch checkpoints")
         from nanoasr.jax.transcribe import transcribe_paths
+        transcribe_paths(args.checkpoint, args.audio)
     else:
         from nanoasr.torch.transcribe import transcribe_paths
-
-    if backend == "torch":
-        transcribe_paths(args.checkpoint, args.audio, args.device)
-    else:
-        transcribe_paths(args.checkpoint, args.audio)
+        transcribe_paths(
+            args.checkpoint, args.audio, args.device,
+            decoder=args.decoder, beam_width=args.beam_width,
+            ctc_weight=args.ctc_weight,
+            lm_path=args.lm_path, lm_weight=args.lm_weight,
+        )
