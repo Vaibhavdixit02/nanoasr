@@ -106,6 +106,13 @@ class ConformerConfig:
     # transcribe/eval/live can rebuild the right encoder/decoder.
     tokenizer_type: str = "char"          # "char" or "bpe"
     spm_model_path: str | None = None     # absolute path to the spm .model
+    # AED decoder (Phase 2). 0 disables — legacy CTC-only checkpoints set this
+    # to 0 (or the field is absent and falls through to the class default),
+    # which keeps them as drop-in replacements.
+    n_decoder_layers: int = 0
+    aed_dropout: float = 0.1
+    label_smoothing: float = 0.1
+    ctc_weight: float = 0.3               # λ in λ·CTC + (1-λ)·CE
 
 
 def get_config(depth: int, vocab_size: int = VOCAB_SIZE) -> ConformerConfig:
@@ -114,6 +121,7 @@ def get_config(depth: int, vocab_size: int = VOCAB_SIZE) -> ConformerConfig:
         d_model=depth * 32,
         n_heads=depth,
         n_layers=depth,
+        n_decoder_layers=max(2, depth // 2),
         vocab_size=vocab_size,
     )
 
@@ -278,7 +286,117 @@ class ConvStem(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Full Conformer with CTC head
+# Transformer Decoder Layer (masked self-attn → cross-attn → FF, pre-norm)
+# ---------------------------------------------------------------------------
+
+class TransformerDecoderLayer(nn.Module):
+    """One AED decoder layer.
+
+    Pre-norm, RoPE on self-attention queries/keys, no positional embedding on
+    cross-attention (encoder positions already carry RoPE info via the encoder
+    self-attention).
+    """
+
+    def __init__(self, d_model: int, n_heads: int,
+                 ff_mult: int = 4, dropout: float = 0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+
+        # Masked self-attention (with RoPE)
+        self.sa_norm = nn.LayerNorm(d_model)
+        self.sa_qkv = nn.Linear(d_model, 3 * d_model)
+        self.sa_out = nn.Linear(d_model, d_model)
+        self.sa_rope = RotaryEmbedding(self.head_dim)
+        self.sa_dropout = nn.Dropout(dropout)
+
+        # Cross-attention onto encoder output
+        self.ca_q_norm = nn.LayerNorm(d_model)
+        self.ca_kv_norm = nn.LayerNorm(d_model)
+        self.ca_q = nn.Linear(d_model, d_model)
+        self.ca_kv = nn.Linear(d_model, 2 * d_model)
+        self.ca_out = nn.Linear(d_model, d_model)
+        self.ca_dropout = nn.Dropout(dropout)
+
+        # Position-wise FF
+        self.ff = FeedForward(d_model, ff_mult, dropout)
+
+    def _self_attention(self, x: torch.Tensor, self_mask: torch.Tensor) -> torch.Tensor:
+        B, S, _ = x.shape
+        h, d = self.n_heads, self.head_dim
+        q, k, v = self.sa_qkv(self.sa_norm(x)).chunk(3, dim=-1)
+        q = q.view(B, S, h, d).transpose(1, 2)  # [B, h, S, d]
+        k = k.view(B, S, h, d).transpose(1, 2)
+        v = v.view(B, S, h, d).transpose(1, 2)
+        q = self.sa_rope(q)
+        k = self.sa_rope(k)
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=self_mask)
+        out = out.transpose(1, 2).contiguous().view(B, S, h * d)
+        return self.sa_dropout(self.sa_out(out))
+
+    def _cross_attention(self, x: torch.Tensor, encoder_out: torch.Tensor,
+                         encoder_mask: torch.Tensor | None) -> torch.Tensor:
+        B, S, _ = x.shape
+        T_enc = encoder_out.shape[1]
+        h, d = self.n_heads, self.head_dim
+        q = self.ca_q(self.ca_q_norm(x))
+        k, v = self.ca_kv(self.ca_kv_norm(encoder_out)).chunk(2, dim=-1)
+        q = q.view(B, S, h, d).transpose(1, 2)
+        k = k.view(B, T_enc, h, d).transpose(1, 2)
+        v = v.view(B, T_enc, h, d).transpose(1, 2)
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=encoder_mask)
+        out = out.transpose(1, 2).contiguous().view(B, S, h * d)
+        return self.ca_dropout(self.ca_out(out))
+
+    def forward(self, x: torch.Tensor, encoder_out: torch.Tensor,
+                encoder_mask: torch.Tensor | None,
+                self_mask: torch.Tensor) -> torch.Tensor:
+        x = x + self._self_attention(x, self_mask)
+        x = x + self._cross_attention(x, encoder_out, encoder_mask)
+        x = x + self.ff(x)
+        return x
+
+
+class TransformerDecoder(nn.Module):
+    """Stack of decoder layers with token embedding and tied output projection."""
+
+    def __init__(self, config: ConformerConfig):
+        super().__init__()
+        self.embed = nn.Embedding(config.vocab_size, config.d_model)
+        self.layers = nn.ModuleList([
+            TransformerDecoderLayer(
+                config.d_model, config.n_heads,
+                config.ff_mult, config.aed_dropout,
+            )
+            for _ in range(config.n_decoder_layers)
+        ])
+        self.final_norm = nn.LayerNorm(config.d_model)
+
+    def forward(self, decoder_input: torch.Tensor, encoder_out: torch.Tensor,
+                encoder_mask: torch.Tensor | None) -> torch.Tensor:
+        """Compute AED logits.
+
+        Args:
+            decoder_input: [B, S] token IDs (already prefixed with <sos>).
+            encoder_out:   [B, T_enc, d].
+            encoder_mask:  [B, 1, 1, T_enc] bool, True=attend (or None).
+
+        Returns:
+            logits: [B, S, vocab_size].
+        """
+        x = self.embed(decoder_input)             # [B, S, d]
+        S = x.shape[1]
+        causal = torch.tril(torch.ones(S, S, dtype=torch.bool, device=x.device))
+        self_mask = causal[None, None]            # [1, 1, S, S]
+        for layer in self.layers:
+            x = layer(x, encoder_out, encoder_mask, self_mask)
+        x = self.final_norm(x)
+        # Tied projection: F.linear uses self.embed.weight as W (shape [V, d])
+        return F.linear(x, self.embed.weight)
+
+
+# ---------------------------------------------------------------------------
+# Full Conformer with CTC head and (optional) AED decoder
 # ---------------------------------------------------------------------------
 
 class Conformer(nn.Module):
@@ -296,22 +414,54 @@ class Conformer(nn.Module):
         ])
         self.ctc_head = nn.Linear(config.d_model, config.vocab_size)
 
-    def forward(self, mel: torch.Tensor, mel_lengths: torch.Tensor | None = None) -> torch.Tensor:
-        # mel: [B, 80, T]
+        if getattr(config, "n_decoder_layers", 0) > 0:
+            self.decoder = TransformerDecoder(config)
+        else:
+            self.decoder = None
+
+    def encode(self, mel: torch.Tensor, mel_lengths: torch.Tensor | None = None):
+        """Run the encoder.
+
+        Returns:
+            encoder_out: [B, T_enc, d_model]
+            encoder_mask: [B, 1, 1, T_enc] bool, True=attend (or None)
+            encoded_lengths: [B] (or None)
+        """
         mel = self.spec_augment(mel)
         x = self.stem(mel)                        # [B, T//4, d_model]
         T_down = x.shape[1]
 
-        mask = None
+        encoder_mask = None
+        encoded_lengths = None
         if mel_lengths is not None:
-            seq_lengths = mel_lengths // 4
+            encoded_lengths = mel_lengths // 4
             idx = torch.arange(T_down, device=x.device)
-            # [B, 1, 1, T] bool mask: True = attend, False = ignore
-            mask = (idx.unsqueeze(0) < seq_lengths.unsqueeze(1)).unsqueeze(1).unsqueeze(1)
+            encoder_mask = (idx.unsqueeze(0) < encoded_lengths.unsqueeze(1))[:, None, None, :]
 
         for block in self.blocks:
-            x = block(x, mask=mask)
+            x = block(x, mask=encoder_mask)
 
-        logits = self.ctc_head(x)                 # [B, T//4, vocab_size]
-        log_probs = F.log_softmax(logits, dim=-1)
-        return log_probs                          # [B, T//4, 28]
+        return x, encoder_mask, encoded_lengths
+
+    def ctc_log_probs(self, encoder_out: torch.Tensor) -> torch.Tensor:
+        return F.log_softmax(self.ctc_head(encoder_out), dim=-1)
+
+    def forward(self, mel: torch.Tensor,
+                mel_lengths: torch.Tensor | None = None,
+                decoder_input: torch.Tensor | None = None):
+        """Run the model.
+
+        With ``decoder_input=None`` (the inference path used by transcribe and
+        live), returns CTC log-probs ``[B, T//4, vocab_size]`` — same shape as
+        before AED was added, so existing callers do not change.
+
+        With a decoder input present (and a decoder configured), returns the
+        tuple ``(ctc_log_probs, aed_logits)`` where ``aed_logits`` is
+        ``[B, S, vocab_size]``.
+        """
+        encoder_out, encoder_mask, _ = self.encode(mel, mel_lengths)
+        ctc_log_probs = self.ctc_log_probs(encoder_out)
+        if decoder_input is None or self.decoder is None:
+            return ctc_log_probs
+        aed_logits = self.decoder(decoder_input, encoder_out, encoder_mask)
+        return ctc_log_probs, aed_logits

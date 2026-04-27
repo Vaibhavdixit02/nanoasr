@@ -82,6 +82,38 @@ def _save_checkpoint(path, model, config, optimizer, scaler, step, epoch,
     }, path)
 
 
+def _build_decoder_io(
+    targets: torch.Tensor,
+    target_lengths: torch.Tensor,
+    sos_id: int,
+    eos_id: int,
+    pad_id: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build AED ``decoder_input`` and ``decoder_target`` from CTC targets.
+
+    For each utterance with target ``t_1..t_n``:
+        decoder_input  = [<sos>, t_1, ..., t_n]            (length n+1)
+        decoder_target = [t_1,   ..., t_n, <eos>]          (length n+1)
+
+    Both are padded to ``max(n_i)+1`` with ``pad_id``. The CE loss uses
+    ``ignore_index=pad_id`` so padded positions contribute nothing.
+    """
+    B, S_max = targets.shape
+    device = targets.device
+    decoder_input = torch.full(
+        (B, S_max + 1), pad_id, dtype=targets.dtype, device=device,
+    )
+    decoder_target = torch.full(
+        (B, S_max + 1), pad_id, dtype=targets.dtype, device=device,
+    )
+    decoder_input[:, 0] = sos_id
+    for i, L in enumerate(target_lengths.tolist()):
+        decoder_input[i, 1:L + 1] = targets[i, :L]
+        decoder_target[i, :L] = targets[i, :L]
+        decoder_target[i, L] = eos_id
+    return decoder_input, decoder_target
+
+
 def train(
     depth: int = 4,
     data: str = "train-clean-100",
@@ -98,8 +130,10 @@ def train(
     resume: str | None = None,
     compile: bool = True,
     vocab_size: int = 1024,
+    ctc_weight: float = 0.3,
+    label_smoothing: float = 0.1,
 ):
-    """Train a Conformer-CTC model. Callable from notebooks or CLI.
+    """Train a hybrid CTC+AED Conformer. Callable from notebooks or CLI.
 
     Args:
         save_dir: Directory for checkpoints. Set to a Google Drive path
@@ -107,11 +141,18 @@ def train(
         resume: Path to a checkpoint to resume training from.
         compile: Use torch.compile for faster training (requires CUDA).
         vocab_size: BPE vocabulary size (auto-trains on first run).
+        ctc_weight: λ in ``λ·CTC + (1-λ)·CE`` joint loss.
+        label_smoothing: AED CE label smoothing.
     """
     tokenizer = ensure_bpe_tokenizer(data_root, data, vocab_size)
+    assert tokenizer.sos_idx is not None and tokenizer.eos_idx is not None, (
+        "AED training requires a tokenizer with sos/eos slots"
+    )
     config = get_config(depth, vocab_size=tokenizer.vocab_size)
     config.tokenizer_type = "bpe"
     config.spm_model_path = tokenizer.model_path
+    config.ctc_weight = ctc_weight
+    config.label_smoothing = label_smoothing
     peak_lr = lr if lr > 0 else 5e-4
     device = get_device(device)
     use_amp = device == "cuda"
@@ -157,6 +198,10 @@ def train(
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     ctc_loss_fn = torch.nn.CTCLoss(blank=tokenizer.blank_idx, zero_infinity=True)
+    ce_loss_fn = torch.nn.CrossEntropyLoss(
+        ignore_index=tokenizer.blank_idx,
+        label_smoothing=label_smoothing,
+    )
 
     best_wer = float("inf")
     start_epoch = 0
@@ -186,30 +231,46 @@ def train(
     log_path = os.path.join(save_dir, f"training_log_depth{depth}.jsonl")
     run_start = time.time()
 
+    sos_id = tokenizer.sos_idx
+    eos_id = tokenizer.eos_idx
+    pad_id = tokenizer.blank_idx
+
     for epoch in range(start_epoch, epochs):
         model.train()
         epoch_loss = 0.0
+        epoch_ctc = 0.0
+        epoch_ce = 0.0
         epoch_start = time.time()
 
         for mels, mel_lengths, targets, target_lengths in train_loader:
             mels = mels.to(device, non_blocking=True)
             targets = targets.to(device, non_blocking=True)
             mel_lengths = mel_lengths.to(device, non_blocking=True)
+            target_lengths = target_lengths.to(device, non_blocking=True)
+
+            decoder_input, decoder_target = _build_decoder_io(
+                targets, target_lengths, sos_id, eos_id, pad_id,
+            )
 
             current_lr = _get_lr(step, warmup_steps, total_steps, peak_lr)
             for pg in optimizer.param_groups:
                 pg["lr"] = current_lr
 
             with torch.amp.autocast("cuda", enabled=use_amp):
-                log_probs = model(mels, mel_lengths)    # [B, T//4, 28]
-                input_lengths = mel_lengths // 4        # ConvStem 4x downsample
+                ctc_log_probs, aed_logits = model(mels, mel_lengths, decoder_input)
+                input_lengths = mel_lengths // 4    # ConvStem 4x downsample
 
-                loss = ctc_loss_fn(
-                    log_probs.permute(1, 0, 2),         # CTC wants [T, B, C]
+                ctc_loss = ctc_loss_fn(
+                    ctc_log_probs.permute(1, 0, 2),  # CTC wants [T, B, C]
                     targets,
                     input_lengths,
                     target_lengths,
                 )
+                ce_loss = ce_loss_fn(
+                    aed_logits.reshape(-1, aed_logits.shape[-1]),
+                    decoder_target.reshape(-1),
+                )
+                loss = ctc_weight * ctc_loss + (1.0 - ctc_weight) * ce_loss
 
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -220,10 +281,14 @@ def train(
 
             step += 1
             epoch_loss += loss.item()
+            epoch_ctc += ctc_loss.item()
+            epoch_ce += ce_loss.item()
 
             if step % 50 == 0:
                 elapsed = time.time() - epoch_start
-                print(f"step {step} | loss {loss.item():.4f} | lr {current_lr:.2e} | {elapsed:.0f}s")
+                print(f"step {step} | loss {loss.item():.4f} "
+                      f"(ctc {ctc_loss.item():.3f} / ce {ce_loss.item():.3f}) "
+                      f"| lr {current_lr:.2e} | {elapsed:.0f}s")
 
         elapsed = time.time() - epoch_start
         total_elapsed = prev_elapsed_sec + (time.time() - run_start)
@@ -252,6 +317,8 @@ def train(
                 "epoch": epoch + 1,
                 "step": step,
                 "avg_loss": avg_loss,
+                "avg_ctc_loss": epoch_ctc / len(train_loader),
+                "avg_ce_loss": epoch_ce / len(train_loader),
                 "epoch_elapsed_sec": elapsed,
                 "total_elapsed_sec": total_elapsed,
                 "utts_per_sec": utts_per_sec,
@@ -287,6 +354,10 @@ def parse_args():
                    help="Disable torch.compile")
     p.add_argument("--vocab-size", type=int, default=1024,
                    help="BPE vocabulary size (auto-trains on first run)")
+    p.add_argument("--ctc-weight", type=float, default=0.3,
+                   help="λ in λ·CTC + (1-λ)·CE joint loss")
+    p.add_argument("--label-smoothing", type=float, default=0.1,
+                   help="AED CE label smoothing")
     return p.parse_args()
 
 
@@ -307,6 +378,8 @@ def main():
         resume=args.resume,
         compile=not args.no_compile,
         vocab_size=args.vocab_size,
+        ctc_weight=args.ctc_weight,
+        label_smoothing=args.label_smoothing,
     )
 
 
